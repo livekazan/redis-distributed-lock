@@ -23,6 +23,8 @@ dependencies {
 }
 ```
 
+add @EnableRedisLock to your configuration Spring boot class.
+
 ## How to use
 
 ```$java
