@@ -1,0 +1,5 @@
+apply plugin: 'checkstyle'
+apply plugin: "com.github.spotbugs"
+apply plugin: 'pmd'
+
+
