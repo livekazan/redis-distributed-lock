@@ -6,6 +6,7 @@ import com.livekazan.redis.lock.ILockService;
 import com.livekazan.redis.lock.exception.LockingException;
 import com.livekazan.redis.lock.exception.UnlockingException;
 import com.livekazan.redis.lock.util.IRedisDateUtils;
+import java.util.List;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.CannotAcquireLockException;
@@ -30,6 +31,8 @@ public class LockService implements ILockService {
 
     private static final String LOCK_VALUE = "LOCKED";
     private static final String LOCK_IS_ALREADY_ACQUIRED = "Lock is already acquired";
+    private static final String REDIS_TEMPLATE_IS_NULL = "RedisTemplate must be provided. Check redis connection.";
+    private static final String LOCK_IS_MISSED = "Lock is missed in redis before expire time";
 
     @Autowired
     private RedisTemplate<String, String> redisTemplate;
@@ -41,10 +44,10 @@ public class LockService implements ILockService {
      * {@inheritDoc}
      */
     @Override
-    public synchronized IJLock acquire(String redisPrefix, String key, Integer releaseTimeMs) throws LockingException {
+    public IJLock acquire(String redisPrefix, String key, Integer releaseTimeMs) throws LockingException {
         try {
             if (redisTemplate == null) {
-                throw new IllegalArgumentException("RedisTemplate must be provided. Check redis connection.");
+                throw new IllegalArgumentException(REDIS_TEMPLATE_IS_NULL);
             }
             final ILockService thisService = this;
             return redisTemplate.execute(new SessionCallback<>() {
@@ -52,22 +55,27 @@ public class LockService implements ILockService {
                 public IJLock execute(RedisOperations operations) throws DataAccessException {
                     IJLock lock = JLock.create(createKey(redisPrefix, key), dateUtils.getZonedDateTime(),
                         releaseTimeMs, thisService);
+                    //start watching for key. Read in transaction
                     operations.watch(lock.getKey());
                     if (operations.opsForValue().get(lock.getKey()) != null) {
                         throw new CannotAcquireLockException(LOCK_IS_ALREADY_ACQUIRED);
                     }
-                    if (operations.opsForValue().get(lock.getKey()) != null) {
-                        throw new CannotAcquireLockException(LOCK_IS_ALREADY_ACQUIRED);
-                    }
+                    //write in transaction
                     operations.multi();
                     operations.opsForValue().setIfAbsent(lock.getKey(), LOCK_VALUE, releaseTimeMs, MILLISECONDS);
-                    operations.exec();
+                    List execResult = operations.exec();
+                    //rollback check
+                    // Here result returns the result of each operation in the transaction, and if the setIfAbsent
+                    // operation fails, result [0] will be false.
+                    if (execResult == null || execResult.isEmpty() || Boolean.FALSE.equals(execResult.get(0))) {
+                        throw new CannotAcquireLockException(LOCK_IS_ALREADY_ACQUIRED);
+                    }
                     return lock;
                 }
             });
         } catch (CannotAcquireLockException e) {
             log.info("Cannot acquire the lock because it is already acquired. key: {}", key);
-            throw new LockingException("Cannot acquire the lock because it is already acquired", e);
+            throw new LockingException(LOCK_IS_ALREADY_ACQUIRED, e);
         } catch (Exception e) {
             log.error("Error on lock acquiring for key: {}", key, e);
             throw new LockingException("Cannot acquire the lock. Unexpected error", e);
@@ -78,14 +86,15 @@ public class LockService implements ILockService {
      * {@inheritDoc}
      */
     @Override
-    public synchronized void release(IJLock lock) throws UnlockingException {
+    public void release(IJLock lock) throws UnlockingException {
         try {
             if (redisTemplate == null) {
-                throw new IllegalArgumentException("RedisTemplate must be provided. Check redis connection.");
+                throw new IllegalArgumentException(REDIS_TEMPLATE_IS_NULL);
             }
             redisTemplate.execute(new SessionCallback<IJLock>() {
                 @Override
                 public IJLock execute(RedisOperations operations) throws DataAccessException {
+                    //start watching for key. Read in transaction
                     operations.watch(lock.getKey());
                     if (operations.opsForValue().get(lock.getKey()) == null) {
                         long difference = Math.abs(dateUtils.getDifference(lock.getAcquiredAt(), now(), MILLIS));
@@ -94,9 +103,10 @@ public class LockService implements ILockService {
                                 lock);
                             return lock;
                         } else {
-                            throw new EmptyResultDataAccessException("Lock is missed in redis before expire time", 1);
+                            throw new EmptyResultDataAccessException(LOCK_IS_MISSED, 1);
                         }
                     }
+                    //transaction start
                     operations.multi();
                     operations.delete(lock.getKey());
                     operations.exec();
@@ -118,7 +128,6 @@ public class LockService implements ILockService {
         if (key == null) {
             throw new IllegalArgumentException("Redis lock key must not be empty. key must be provided");
         }
-
         return redisPrefix + StringUtils.trimAllWhitespace(key);
     }
 }
