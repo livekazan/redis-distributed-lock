@@ -64,7 +64,7 @@ public class LockService implements ILockService {
                     operations.multi();
                     operations.opsForValue().setIfAbsent(lock.getKey(), LOCK_VALUE, releaseTimeMs, MILLISECONDS);
                     List execResult = operations.exec();
-                    //rollback check
+                    //rollback check. Jedis returns, in any case, a List object. Other implementations can return null
                     // Here result returns the result of each operation in the transaction, and if the setIfAbsent
                     // operation fails, result [0] will be false.
                     if (execResult == null || execResult.isEmpty() || Boolean.FALSE.equals(execResult.get(0))) {
