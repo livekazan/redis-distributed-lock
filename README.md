@@ -5,6 +5,7 @@ Can be useful for microservice approach to synchronize events on different nodes
 ## Requirements
  - Java 11
  - Redis
+ - Spring Data
 
 
 ## Integration
